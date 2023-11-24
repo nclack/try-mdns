@@ -8,12 +8,13 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-clap = { version = "4.3.19", features = ["derive"] }
-dotenv = "0.15.0"
-pollster = { version = "0.3.0", features = ["macro"] }
-pretty_env_logger = "0.5.0"
-mdns-sd = { version = "0.7.3", features = ["async"] }
-anyhow = "1.0.72"
-log = "0.4.19"
-futures-timer = "3.0.2"
-gethostname = "0.4.3"
+clap = { version = "4.3", features = ["derive"] }
+dotenv = "0.15"
+# pollster = { version = "0.3", features = ["macro"] }
+pretty_env_logger = "0.5"
+mdns-sd = { version = "0.9", features = ["async"] }
+anyhow = "1.0"
+log = "0.4"
+futures-timer = "3.0"
+gethostname = "0.4"
+smol = "1.3"
