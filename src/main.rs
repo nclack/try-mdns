@@ -1,10 +1,13 @@
-use std::{net::SocketAddr, time::Duration};
+use std::{fmt::Write, net::SocketAddr, time::Duration};
 
 use anyhow::Result;
 use clap::Parser;
 use log::info;
 use mdns_sd::ServiceInfo;
-use smol::net::UdpSocket;
+use smol::{
+    channel::{bounded, Receiver, Sender},
+    net::UdpSocket,
+};
 
 #[derive(Parser, Debug, Clone)]
 #[command(
@@ -40,27 +43,71 @@ struct Config {
     properties: Vec<(String, String)>,
 }
 
+struct Message {
+    dst: SocketAddr,
+    buf: [u8; 1 << 10],
+    n: usize,
+}
+
+impl Write for Message {
+    fn write_str(&mut self, s: &str) -> std::fmt::Result {
+        let Message {
+            dst: _,
+            ref mut buf,
+            ref mut n,
+        } = self;
+        for (i, c) in s.bytes().enumerate() {
+            buf[*n + i] = c;
+        }
+        *n += s.len();
+        Ok(())
+    }
+}
+
 struct UdpService {
     sock: UdpSocket,
+    rx: Receiver<Message>,
 }
 
 impl UdpService {
-    async fn new(config: &Config) -> Result<Self> {
-        let sock = UdpSocket::bind(("127.0.0.1", config.port)).await?;
+    async fn new(config: &Config) -> Result<(Self, Sender<Message>)> {
+        let sock = UdpSocket::bind(("10.0.0.142", config.port)).await?;
         info!("UdpSocket at local addr {:?}", sock.local_addr());
-        Ok(Self { sock })
+        let (tx, rx) = bounded(10);
+        Ok((Self { sock, rx }, tx))
     }
 
     async fn run(self) -> Result<()> {
-        let mut buf = vec![0u8; 20];
+        let Self { sock, rx } = self;
 
-        info!("LISTENING on {:?}", self.sock.local_addr());
-        loop {
-            // Receive a single datagram message.
-            // If `buf` is too small to hold the entire message, it will be cut off.
-            let (n, addr) = self.sock.recv_from(&mut buf).await?;
-            info!("RECV {:?} FROM {:}", &buf[0..n], addr);
-        }
+        info!("LISTENING on {:?}", sock.local_addr());
+        smol::future::try_zip(
+            async {
+                loop {
+                    let Message { dst, buf, n } = rx.recv().await?;
+                    let s = String::from_utf8_lossy(&buf[0..n]);
+                    info!("SEND message to {} \"{}\": {:?}", dst, s, &buf[0..n]);
+                    sock.send_to(&buf, dst).await?;
+                }
+                #[allow(unreachable_code)]
+                Ok(())
+            },
+            async {
+                // Receive a single datagram message.
+                // If `buf` is too small to hold the entire message, it will be cut off.
+                loop {
+                    info!("Listening for messages");
+                    let mut buf = vec![0u8; 1 << 10];
+                    let (n, addr) = sock.recv_from(&mut buf).await?;
+                    let s = String::from_utf8_lossy(&buf[0..n]);
+                    info!("RECV \"{}\" FROM {:} {:?}", s, addr, &buf[0..n.min(10)]);
+                }
+                #[allow(unreachable_code)]
+                Ok::<_, anyhow::Error>(())
+            },
+        )
+        .await?;
+        Ok(())
     }
 }
 
@@ -77,7 +124,7 @@ impl DiscoveryService {
         }
     }
 
-    async fn run(self) -> Result<()> {
+    async fn run(self, tx: Sender<Message>) -> Result<()> {
         info!("STARTING DISCOVERY");
         let config = &self.config;
         let service_name = format!("{}.local.", config.service_name);
@@ -101,11 +148,27 @@ impl DiscoveryService {
         // let receiver = service.monitor()?;
 
         while let Ok(event) = receiver.recv_async().await {
-            info!("Event: {event:?}");
+            // info!("Event: {event:?}");
             match event {
                 mdns_sd::ServiceEvent::ServiceResolved(info) => {
-                    info!("ServiceResolved");
-                    todo!()
+                    if let Some(ip) = info.get_addresses_v4().into_iter().next() {
+                        info!("ServiceResolved");
+
+                        let mut msg = Message {
+                            dst: SocketAddr::from((*ip, info.get_port())),
+                            buf: [0; 1024],
+                            n: 0,
+                        };
+
+                        write!(
+                            &mut msg,
+                            "MESSAGE {} Resolved {} END",
+                            config.instance_name,
+                            info.get_fullname()
+                        )?;
+                        info!("ServiceResolved: sending message");
+                        tx.send(msg).await?;
+                    }
                 }
                 _ => (),
             }
@@ -123,13 +186,18 @@ fn main() -> Result<()> {
 
         info!("Hi there! {config:?}");
 
+        // List all of the machine's network interfaces
+        // for iface in if_addrs::get_if_addrs().unwrap() {
+        //     info!("{:#?}", iface);
+        // }
+
         info!("Spinning up UDP listener");
-        let udp_service = UdpService::new(&config).await?;
+        let (udp_service, tx) = UdpService::new(&config).await?;
 
         info!("Spinning up mDNS discovery");
         let discovery_service = DiscoveryService::new(&config, udp_service.sock.local_addr()?);
 
-        smol::future::try_zip(udp_service.run(), discovery_service.run()).await?;
+        smol::future::try_zip(udp_service.run(), discovery_service.run(tx)).await?;
 
         Ok(())
     })

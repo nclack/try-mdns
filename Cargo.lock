@@ -889,6 +889,7 @@ dependencies = [
  "dotenv",
  "futures-timer",
  "gethostname",
+ "if-addrs",
  "log",
  "mdns-sd",
  "pretty_env_logger",
