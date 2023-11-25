@@ -1,6 +1,10 @@
-use std::{fmt::Write, net::SocketAddr, time::Duration};
+use std::{
+    fmt::Write,
+    net::{IpAddr, SocketAddr},
+    time::Duration,
+};
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use clap::Parser;
 use log::info;
 use mdns_sd::ServiceInfo;
@@ -71,7 +75,22 @@ struct UdpService {
 
 impl UdpService {
     async fn new(config: &Config) -> Result<(Self, Sender<Message>)> {
-        let sock = UdpSocket::bind(("10.0.0.142", config.port)).await?;
+        // select the address to bind to
+        let addr = if_addrs::get_if_addrs()?
+            .into_iter()
+            .filter(|iface| !iface.is_loopback() && !iface.is_link_local() && iface.ip().is_ipv4())
+            .map(|iface| iface.ip())
+            .filter(|ip| {
+                if let IpAddr::V4(ipv4) = ip {
+                    ipv4.octets()[0] == 10
+                } else {
+                    false
+                }
+            })
+            .next()
+            .ok_or(anyhow!("Failed to select network interface"))?;
+
+        let sock = UdpSocket::bind((addr, config.port)).await?;
         info!("UdpSocket at local addr {:?}", sock.local_addr());
         let (tx, rx) = bounded(10);
         Ok((Self { sock, rx }, tx))
@@ -86,7 +105,7 @@ impl UdpService {
                 loop {
                     let Message { dst, buf, n } = rx.recv().await?;
                     let s = String::from_utf8_lossy(&buf[0..n]);
-                    info!("SEND message to {} \"{}\": {:?}", dst, s, &buf[0..n]);
+                    info!("SEND message to {} \"{}\"", dst, s);
                     sock.send_to(&buf, dst).await?;
                 }
                 #[allow(unreachable_code)]
@@ -100,7 +119,7 @@ impl UdpService {
                     let mut buf = vec![0u8; 1 << 10];
                     let (n, addr) = sock.recv_from(&mut buf).await?;
                     let s = String::from_utf8_lossy(&buf[0..n]);
-                    info!("RECV \"{}\" FROM {:} {:?}", s, addr, &buf[0..n.min(10)]);
+                    info!("RECV \"{}\" FROM {:}", s, addr);
                 }
                 #[allow(unreachable_code)]
                 Ok::<_, anyhow::Error>(())
@@ -151,7 +170,7 @@ impl DiscoveryService {
             // info!("Event: {event:?}");
             match event {
                 mdns_sd::ServiceEvent::ServiceResolved(info) => {
-                    if let Some(ip) = info.get_addresses_v4().into_iter().next() {
+                    for ip in info.get_addresses_v4().into_iter() {
                         info!("ServiceResolved");
 
                         let mut msg = Message {
@@ -187,9 +206,14 @@ fn main() -> Result<()> {
         info!("Hi there! {config:?}");
 
         // List all of the machine's network interfaces
-        // for iface in if_addrs::get_if_addrs().unwrap() {
-        //     info!("{:#?}", iface);
-        // }
+        for iface in if_addrs::get_if_addrs().unwrap() {
+            info!(
+                "{:#?} {} {}",
+                iface,
+                if iface.is_loopback() { "LOOPBACK" } else { "" },
+                if iface.is_link_local() { "LOCAL" } else { "" }
+            );
+        }
 
         info!("Spinning up UDP listener");
         let (udp_service, tx) = UdpService::new(&config).await?;
