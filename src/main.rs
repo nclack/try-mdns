@@ -80,12 +80,9 @@ impl UdpService {
             .into_iter()
             .filter(|iface| !iface.is_loopback() && !iface.is_link_local() && iface.ip().is_ipv4())
             .map(|iface| iface.ip())
-            .filter(|ip| {
-                if let IpAddr::V4(ipv4) = ip {
-                    ipv4.octets()[0] == 10
-                } else {
-                    false
-                }
+            .filter(|ip| match ip {
+                IpAddr::V4(v4) => v4.octets()[0] == 10,
+                IpAddr::V6(_v6) => false,
             })
             .next()
             .ok_or(anyhow!("Failed to select network interface"))?;
@@ -211,7 +208,7 @@ fn main() -> Result<()> {
                 "{:#?} {} {}",
                 iface,
                 if iface.is_loopback() { "LOOPBACK" } else { "" },
-                if iface.is_link_local() { "LOCAL" } else { "" }
+                if iface.is_link_local() { "LOCAL" } else { "" },
             );
         }
 
